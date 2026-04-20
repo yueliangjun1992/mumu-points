@@ -905,7 +905,7 @@
 
             <!-- 积分记录 -->
             <div class="records-section">
-                <div class="section-title">📋 积分记录</div>
+                <div class="section-title">📋 积分记录 <span id="recordCount" style="font-size: 12px; color: #999;"></span></div>
                 <ul class="record-list" id="recordList">
                     <!-- 动态生成 -->
                 </ul>
@@ -1351,6 +1351,31 @@
                         updated_at: new Date().toISOString()
                     }, { onConflict: 'id' });
 
+                // 限制云端记录数量（最多保留200条）
+                const MAX_CLOUD_RECORDS = 200;
+                const { data: existingRecords } = await supabaseClient
+                    .from('records')
+                    .select('id, created_at')
+                    .order('created_at', { ascending: true });
+                
+                if (existingRecords && existingRecords.length > MAX_CLOUD_RECORDS) {
+                    const recordsToDelete = existingRecords.slice(0, existingRecords.length - MAX_CLOUD_RECORDS);
+                    const idsToDelete = recordsToDelete.map(r => r.id);
+                    await supabaseClient.from('records').delete().in('id', idsToDelete);
+                }
+                
+                // 同样限制兑换记录
+                const { data: existingExchanges } = await supabaseClient
+                    .from('exchanges')
+                    .select('id, created_at')
+                    .order('created_at', { ascending: true });
+                
+                if (existingExchanges && existingExchanges.length > 100) {
+                    const exchangesToDelete = existingExchanges.slice(0, existingExchanges.length - 100);
+                    const idsToDelete = exchangesToDelete.map(r => r.id);
+                    await supabaseClient.from('exchanges').delete().in('id', idsToDelete);
+                }
+
             } catch (error) {
                 console.error('保存云端数据失败:', error);
             }
@@ -1722,12 +1747,19 @@
             return `${month}月${day}日${hours}:${minutes}`;
         }
         
-        // 渲染记录
+        // 渲染记录（限制显示数量，避免页面过长）
+        const MAX_DISPLAY_RECORDS = 30; // 最多显示30条
+        
         function renderRecords() {
             const list = document.getElementById('recordList');
             list.innerHTML = '';
             
-            const recentRecords = appData.records.slice(-30).reverse();
+            const totalRecords = appData.records.length;
+            const recentRecords = appData.records.slice(-MAX_DISPLAY_RECORDS).reverse();
+            
+            // 更新标题显示总条数
+            document.getElementById('recordCount').textContent = totalRecords > 0 ? `(共${totalRecords}条)` : '';
+            
             recentRecords.forEach(record => {
                 const li = document.createElement('li');
                 li.className = 'record-item';
@@ -1747,6 +1779,14 @@
                 `;
                 list.appendChild(li);
             });
+            
+            // 如果记录过多，显示提示
+            if (totalRecords > MAX_DISPLAY_RECORDS) {
+                const infoDiv = document.createElement('div');
+                infoDiv.style.cssText = 'text-align: center; padding: 15px; color: #999; font-size: 13px;';
+                infoDiv.textContent = `共 ${totalRecords} 条记录，显示最近 ${MAX_DISPLAY_RECORDS} 条`;
+                list.appendChild(infoDiv);
+            }
         }
 
         // 渲染兑换记录
@@ -2249,7 +2289,7 @@
             showConfirm(
                 '⚠️ 清空所有数据',
                 '确定要清空所有数据吗？\n\n此操作不可恢复，所有积分记录、打卡记录将全部删除！',
-                function() {
+                async function() {
                     localStorage.removeItem('pointsAppData');
                     appData = {
                         currentPoints: 0,
@@ -2263,7 +2303,18 @@
                         lastWeeklyCalculation: null,
                         lastSaveDate: null
                     };
-                    saveData();
+                    
+                    // 同时清空云端数据
+                    if (isOnline && supabaseClient) {
+                        try {
+                            await supabaseClient.from('app_main').delete().eq('id', 'main');
+                            await supabaseClient.from('records').delete().neq('id', '0'); // 删除所有记录
+                            await supabaseClient.from('exchanges').delete().neq('id', '0'); // 删除所有兑换
+                        } catch (e) {
+                            console.error('清空云端数据失败:', e);
+                        }
+                    }
+                    
                     updateDisplay();
                     renderRecords();
                     renderExchangeRecords();
