@@ -1537,19 +1537,24 @@
             const today = now.getDay(); // 0=周日, 1=周一, ..., 6=周六
             const hour = now.getHours();
             
+            // 初始化
+            if (!appData.weeklyCalculations) {
+                appData.weeklyCalculations = {};
+            }
+            
             // 1. 检查是否需要补算"上周"（周一至周六，且上周还没结算）
-            // 触发条件：今天不是周日，且上周尚未结算
             if (today !== 0) {
                 const lastWeekRange = getLastWeekRange();
                 const lastWeekKey = 'lastWeek_' + lastWeekRange.startStr;
-                if (!appData.weeklyCalculations) {
-                    appData.weeklyCalculations = {};
-                }
                 if (!appData.weeklyCalculations[lastWeekKey]) {
-                    // 上周还没结算，补算上周
-                    const lastWeekResult = _doWeeklyDeduction(lastWeekRange, true);
+                    // 立即同步标记为已计算（防止刷新重复执行）
                     appData.weeklyCalculations[lastWeekKey] = lastWeekRange.endStr;
+                    localStorage.setItem('pointsAppData', JSON.stringify(appData));
+                    
+                    // 执行扣分
+                    const lastWeekResult = _doWeeklyDeduction(lastWeekRange, true);
                     saveData();
+                    
                     if (lastWeekResult.success && lastWeekResult.netChange !== 0) {
                         updateDisplay();
                         renderRecords();
@@ -1568,13 +1573,14 @@
             // 2. 检查是否需要结算"当前周"（周日23点后）
             if (today === 0 && hour >= 23) {
                 const currentWeekKey = 'currentWeek_' + getCurrentWeekRange().startStr;
-                if (!appData.weeklyCalculations) {
-                    appData.weeklyCalculations = {};
-                }
                 if (!appData.weeklyCalculations[currentWeekKey]) {
-                    const currentWeekResult = calculateWeeklyDeduction();
+                    // 立即同步标记
                     appData.weeklyCalculations[currentWeekKey] = getCurrentWeekRange().endStr;
+                    localStorage.setItem('pointsAppData', JSON.stringify(appData));
+                    
+                    const currentWeekResult = calculateWeeklyDeduction();
                     saveData();
+                    
                     if (currentWeekResult.success) {
                         updateDisplay();
                         renderRecords();
