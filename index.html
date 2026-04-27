@@ -1210,6 +1210,33 @@
 
         // ========== 初始化 ==========
         function init() {
+            const params = new URLSearchParams(window.location.search);
+            window._purgeWeeklyRecords = false;
+            const doClear = params.get('clear') === 'lastWeek';
+            const doReset = params.get('reset') === '1';
+
+            if (doClear || doReset) {
+                // 直接读写 localStorage
+                const saved = localStorage.getItem('pointsAppData');
+                let data = saved ? JSON.parse(saved) : {};
+                // 清理周考核记录
+                data.records = (data.records || []).filter(r => !r.name || r.name.indexOf('周考核') === -1);
+                if (doClear) {
+                    if (data.weeklyCalculations) {
+                        Object.keys(data.weeklyCalculations).forEach(k => {
+                            if (k.startsWith('lastWeek_')) delete data.weeklyCalculations[k];
+                        });
+                    }
+                } else if (doReset) {
+                    data.weeklyCalculations = {};
+                    data.lastWeeklyCalculation = null;
+                }
+                localStorage.setItem('pointsAppData', JSON.stringify(data));
+                window.history.replaceState({}, '', window.location.pathname);
+                window._purgeWeeklyRecords = true; // 通知后续加载时也过滤云端记录
+                setTimeout(() => alert('✅ 清理完成！'), 100);
+            }
+
             // 先尝试云端同步
             initSupabase();
         }
@@ -1287,7 +1314,7 @@
                     .limit(100);
 
                 if (recordsData) {
-                    appData.records = recordsData.map(r => ({
+                    let records = recordsData.map(r => ({
                         icon: r.icon,
                         name: r.name,
                         detail: r.detail,
@@ -1296,6 +1323,11 @@
                         date: r.date,
                         isAuto: r.is_auto
                     }));
+                    // 清理模式：过滤掉周考核记录
+                    if (window._purgeWeeklyRecords) {
+                        records = records.filter(r => !r.name || r.name.indexOf('周考核') === -1);
+                    }
+                    appData.records = records;
                 }
 
                 // 加载兑换记录
@@ -1399,6 +1431,8 @@
         // 添加记录到云端
         async function addRecordToCloud(record) {
             if (!isOnline || !supabaseClient) return;
+            // 清理模式下不保存周考核记录到云端
+            if (window._purgeWeeklyRecords && record.name && record.name.indexOf('周考核') !== -1) return;
 
             try {
                 await supabaseClient
@@ -1463,18 +1497,6 @@
                 if (!appData.totalDeduct) appData.totalDeduct = 0;
                 if (!appData.totalExchange) appData.totalExchange = 0;
                 if (!appData.weeklyCalculations) appData.weeklyCalculations = {};
-                
-                // URL 带 ?reset=1 时，清除周考核数据（保留打卡记录）
-                const params = new URLSearchParams(window.location.search);
-                if (params.get('reset') === '1') {
-                    appData.records = (appData.records || []).filter(r => !r.name || r.name.indexOf('周考核') === -1);
-                    appData.weeklyCalculations = {};
-                    appData.lastWeeklyCalculation = null;
-                    localStorage.setItem('pointsAppData', JSON.stringify(appData));
-                    // 清除 URL 参数
-                    window.history.replaceState({}, '', window.location.pathname);
-                    setTimeout(() => alert('✅ 周考核数据已清除，打卡记录已保留！'), 100);
-                }
             }
         }
 
@@ -1527,25 +1549,44 @@
             };
         }
         
+        // 直接读写 localStorage 读写 marker（不依赖内存 appData，防止云端数据覆盖后丢失 marker）
+        function getWeeklyCalcMarker(key) {
+            const saved = localStorage.getItem('pointsAppData');
+            if (!saved) return null;
+            try {
+                const data = JSON.parse(saved);
+                return data.weeklyCalculations ? data.weeklyCalculations[key] : null;
+            } catch { return null; }
+        }
+
+        function setWeeklyCalcMarker(key, value) {
+            const saved = localStorage.getItem('pointsAppData');
+            let data;
+            try {
+                data = saved ? JSON.parse(saved) : {};
+            } catch { data = {}; }
+            if (!data.weeklyCalculations) data.weeklyCalculations = {};
+            data.weeklyCalculations[key] = value;
+            localStorage.setItem('pointsAppData', JSON.stringify(data));
+        }
+
         // 检查是否需要周计算（周日23点自动执行本周扣分，或补算上周）
         function checkWeeklyCalculation() {
             const now = new Date();
             const today = now.getDay(); // 0=周日, 1=周一, ..., 6=周六
             const hour = now.getHours();
             
-            // 初始化
-            if (!appData.weeklyCalculations) {
-                appData.weeklyCalculations = {};
-            }
-            
             // 1. 检查是否需要补算"上周"（周一至周六，且上周还没结算）
             if (today !== 0) {
                 const lastWeekRange = getLastWeekRange();
                 const lastWeekKey = 'lastWeek_' + lastWeekRange.startStr;
-                if (!appData.weeklyCalculations[lastWeekKey]) {
-                    // 立即同步标记为已计算（防止刷新重复执行）
+                // 直接从 localStorage 读 marker，不依赖内存里的 appData
+                if (!getWeeklyCalcMarker(lastWeekKey)) {
+                    // 立即把 marker 写入 localStorage（防止刷新重复执行）
+                    setWeeklyCalcMarker(lastWeekKey, lastWeekRange.endStr);
+                    // 同步更新内存
+                    if (!appData.weeklyCalculations) appData.weeklyCalculations = {};
                     appData.weeklyCalculations[lastWeekKey] = lastWeekRange.endStr;
-                    localStorage.setItem('pointsAppData', JSON.stringify(appData));
                     
                     // 执行扣分
                     const lastWeekResult = _doWeeklyDeduction(lastWeekRange, true);
@@ -1568,11 +1609,13 @@
             
             // 2. 检查是否需要结算"当前周"（周日23点后）
             if (today === 0 && hour >= 23) {
-                const currentWeekKey = 'currentWeek_' + getCurrentWeekRange().startStr;
-                if (!appData.weeklyCalculations[currentWeekKey]) {
-                    // 立即同步标记
-                    appData.weeklyCalculations[currentWeekKey] = getCurrentWeekRange().endStr;
-                    localStorage.setItem('pointsAppData', JSON.stringify(appData));
+                const weekRange = getCurrentWeekRange();
+                const currentWeekKey = 'currentWeek_' + weekRange.startStr;
+                if (!getWeeklyCalcMarker(currentWeekKey)) {
+                    // 立即把 marker 写入 localStorage
+                    setWeeklyCalcMarker(currentWeekKey, weekRange.endStr);
+                    if (!appData.weeklyCalculations) appData.weeklyCalculations = {};
+                    appData.weeklyCalculations[currentWeekKey] = weekRange.endStr;
                     
                     const currentWeekResult = calculateWeeklyDeduction();
                     saveData();
