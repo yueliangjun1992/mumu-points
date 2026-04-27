@@ -1462,6 +1462,19 @@
                 if (!appData.totalGain) appData.totalGain = 0;
                 if (!appData.totalDeduct) appData.totalDeduct = 0;
                 if (!appData.totalExchange) appData.totalExchange = 0;
+                if (!appData.weeklyCalculations) appData.weeklyCalculations = {};
+                
+                // URL 带 ?reset=1 时，清除周考核数据（保留打卡记录）
+                const params = new URLSearchParams(window.location.search);
+                if (params.get('reset') === '1') {
+                    appData.records = (appData.records || []).filter(r => !r.name || r.name.indexOf('周考核') === -1);
+                    appData.weeklyCalculations = {};
+                    appData.lastWeeklyCalculation = null;
+                    localStorage.setItem('pointsAppData', JSON.stringify(appData));
+                    // 清除 URL 参数
+                    window.history.replaceState({}, '', window.location.pathname);
+                    setTimeout(() => alert('✅ 周考核数据已清除，打卡记录已保留！'), 100);
+                }
             }
         }
 
@@ -1472,25 +1485,8 @@
             saveCloudData(); // 同时保存到云端
         }
 
-        // 获取当前周的开始和结束日期
-        function getCurrentWeekRange() {
-            const now = new Date();
-            const dayOfWeek = now.getDay() || 7;
-            const monday = new Date(now);
-            monday.setDate(now.getDate() - dayOfWeek + 1);
-            monday.setHours(0, 0, 0, 0);
-            const sunday = new Date(monday);
-            sunday.setDate(monday.getDate() + 6);
-            sunday.setHours(23, 59, 59, 999);
-            
-            return {
-                start: monday,
-                end: sunday,
-                startStr: monday.toISOString().split('T')[0],
-                endStr: sunday.toISOString().split('T')[0]
-            };
-        }
-        
+        // ========== 周计算工具 ==========
+
         // 获取当前周的开始和结束日期（周一~周日）
         function getCurrentWeekRange() {
             const now = new Date();
