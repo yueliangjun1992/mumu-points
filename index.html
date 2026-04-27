@@ -1174,7 +1174,8 @@
             exchangeRecords: [],
             evaluations: {},
             weeklyCheckins: {},
-            lastWeeklyCalculation: null,
+            weeklyCalculations: {}, // { key: 'lastWeek_2026-04-13': '2026-04-19', ... }
+            lastWeeklyCalculation: null, // 兼容旧数据
             lastSaveDate: null
         };
 
@@ -1262,6 +1263,20 @@
                     appData.evaluations = mainData.evaluations || {};
                     appData.weeklyCheckins = mainData.weekly_checkins || {};
                     appData.lastWeeklyCalculation = mainData.last_weekly_calculation;
+                    
+                    // 兼容旧数据：把 lastWeeklyCalculation 迁移到 weeklyCalculations
+                    if (appData.lastWeeklyCalculation && !appData.weeklyCalculations) {
+                        appData.weeklyCalculations = {};
+                        // 推算该日期是本周还是上周
+                        const calcDate = new Date(appData.lastWeeklyCalculation);
+                        const today = new Date();
+                        const currentWeekStart = getCurrentWeekRange().startStr;
+                        if (appData.lastWeeklyCalculation < currentWeekStart) {
+                            appData.weeklyCalculations['lastWeek_' + appData.lastWeeklyCalculation] = '';
+                        } else {
+                            appData.weeklyCalculations['currentWeek_' + appData.lastWeeklyCalculation] = '';
+                        }
+                    }
                 }
 
                 // 加载记录
@@ -1476,6 +1491,25 @@
             };
         }
         
+        // 获取当前周的开始和结束日期（周一~周日）
+        function getCurrentWeekRange() {
+            const now = new Date();
+            const dayOfWeek = now.getDay() || 7;
+            const monday = new Date(now);
+            monday.setDate(now.getDate() - dayOfWeek + 1);
+            monday.setHours(0, 0, 0, 0);
+            const sunday = new Date(monday);
+            sunday.setDate(monday.getDate() + 6);
+            sunday.setHours(23, 59, 59, 999);
+            
+            return {
+                start: monday,
+                end: sunday,
+                startStr: monday.toISOString().split('T')[0],
+                endStr: sunday.toISOString().split('T')[0]
+            };
+        }
+        
         // 获取上一周的开始和结束日期
         function getLastWeekRange() {
             const now = new Date();
@@ -1497,23 +1531,55 @@
             };
         }
         
-        // 检查是否需要周计算（周日23点自动执行本周扣分）
+        // 检查是否需要周计算（周日23点自动执行本周扣分，或补算上周）
         function checkWeeklyCalculation() {
             const now = new Date();
-            const nowStr = now.toISOString().split('T')[0];
+            const today = now.getDay(); // 0=周日, 1=周一, ..., 6=周六
+            const hour = now.getHours();
             
-            // 如果是周日23点后，且本周还未计算过
-            if (now.getDay() === 0 && now.getHours() >= 23) {
-                const weekRange = getCurrentWeekRange();
-                if (!appData.lastWeeklyCalculation || 
-                    appData.lastWeeklyCalculation < weekRange.startStr) {
-                    const result = calculateWeeklyDeduction();
+            // 1. 检查是否需要补算"上周"（周一至周六，且上周还没结算）
+            // 触发条件：今天不是周日，且上周尚未结算
+            if (today !== 0) {
+                const lastWeekRange = getLastWeekRange();
+                const lastWeekKey = 'lastWeek_' + lastWeekRange.startStr;
+                if (!appData.weeklyCalculations) {
+                    appData.weeklyCalculations = {};
+                }
+                if (!appData.weeklyCalculations[lastWeekKey]) {
+                    // 上周还没结算，补算上周
+                    const lastWeekResult = _doWeeklyDeduction(lastWeekRange, true);
+                    appData.weeklyCalculations[lastWeekKey] = lastWeekRange.endStr;
                     saveData();
-                    if (result.success) {
+                    if (lastWeekResult.success && lastWeekResult.netChange !== 0) {
                         updateDisplay();
                         renderRecords();
                         updateWeekStats();
-                        const netStr = result.netChange >= 0 ? `+${result.netChange}` : `${result.netChange}`;
+                        const netStr = lastWeekResult.netChange >= 0 ? `+${lastWeekResult.netChange}` : `${lastWeekResult.netChange}`;
+                        showToast(`📊 上周(${lastWeekRange.startStr}~${lastWeekRange.endStr})考核补算完成！积分净变化 ${netStr} 分`);
+                    } else if (lastWeekResult.success && lastWeekResult.netChange === 0) {
+                        updateDisplay();
+                        renderRecords();
+                        updateWeekStats();
+                        showToast(`📊 上周已全部完成，暂无扣分项！`);
+                    }
+                }
+            }
+            
+            // 2. 检查是否需要结算"当前周"（周日23点后）
+            if (today === 0 && hour >= 23) {
+                const currentWeekKey = 'currentWeek_' + getCurrentWeekRange().startStr;
+                if (!appData.weeklyCalculations) {
+                    appData.weeklyCalculations = {};
+                }
+                if (!appData.weeklyCalculations[currentWeekKey]) {
+                    const currentWeekResult = calculateWeeklyDeduction();
+                    appData.weeklyCalculations[currentWeekKey] = getCurrentWeekRange().endStr;
+                    saveData();
+                    if (currentWeekResult.success) {
+                        updateDisplay();
+                        renderRecords();
+                        updateWeekStats();
+                        const netStr = currentWeekResult.netChange >= 0 ? `+${currentWeekResult.netChange}` : `${currentWeekResult.netChange}`;
                         showToast(`📊 周考核完成！积分净变化 ${netStr} 分`);
                     }
                 }
@@ -1645,6 +1711,19 @@
             
             // 应用变化
             if (applyChanges && (totalDeduct > 0 || totalGainBack > 0)) {
+                // 初始化 weeklyCalculations（兼容旧数据）
+                if (!appData.weeklyCalculations) {
+                    appData.weeklyCalculations = {};
+                }
+                
+                // 判断是本周还是上周，设置对应的 key
+                const currentWeekStart = getCurrentWeekRange().startStr;
+                const isLastWeek = weekRange.startStr < currentWeekStart;
+                const calcKey = isLastWeek ? ('lastWeek_' + weekRange.startStr) : ('currentWeek_' + weekRange.startStr);
+                
+                // 标记为已结算（无论是否有实际扣分，都标记，避免重复）
+                appData.weeklyCalculations[calcKey] = weekRange.endStr;
+                
                 // 处理扣分
                 deductRecords.forEach(record => {
                     // 干饭使用 netDeductPoints，其他任务使用 deductPoints
@@ -1659,7 +1738,7 @@
                     }
                     const rec = {
                         icon: record.config.icon,
-                        name: `${record.config.name} 周考核`,
+                        name: `${record.config.name} 周考核${isLastWeek ? '(补算)' : ''}`,
                         detail,
                         points: -deductAmt,
                         time: new Date().toLocaleString('zh-CN'),
@@ -1670,23 +1749,25 @@
                     addRecordToCloud(rec);
                 });
                 
-                appData.lastWeeklyCalculation = weekRange.startStr;
-                
-                return { success: totalDeduct > 0 || totalGainBack > 0, totalDeduct, totalGainBack, netChange, previewLines };
+                return { success: true, totalDeduct, totalGainBack, netChange, previewLines, isLastWeek };
             }
             
-            return { success: false, totalDeduct, totalGainBack, netChange, previewLines };
+            return { success: false, totalDeduct, totalGainBack, netChange, previewLines, isLastWeek: false };
         }
         // 手动触发周扣分计算
         function manualWeeklyCalculation() {
             const now = new Date();
             const isSundayNight = now.getDay() === 0 && now.getHours() >= 23;
             const weekRange = getCurrentWeekRange();
-            const alreadyCalculated = appData.lastWeeklyCalculation && appData.lastWeeklyCalculation >= weekRange.startStr;
+            
+            // 使用新的 weeklyCalculations 检查
+            if (!appData.weeklyCalculations) appData.weeklyCalculations = {};
+            const currentKey = 'currentWeek_' + weekRange.startStr;
+            const alreadyCalculated = !!appData.weeklyCalculations[currentKey];
             
             if (isSundayNight) {
                 if (alreadyCalculated) {
-                    showToast('本周扣分已结算完成');
+                    showToast('✅ 本周扣分已结算完成');
                     return;
                 }
                 
@@ -1704,7 +1785,7 @@
                                 renderRecords();
                                 updateWeekStats();
                                 const netStr = result.netChange >= 0 ? `+${result.netChange}` : `${result.netChange}`;
-                                showToast(`✅ 周考核完成！积分净变化 ${netStr} 分`);
+                                showToast(`✅ 本周考核完成！积分净变化 ${netStr} 分`);
                             } else {
                                 showToast('🎉 本周已全部完成，无需扣分！');
                             }
@@ -2300,6 +2381,7 @@
                         exchangeRecords: [],
                         evaluations: {},
                         weeklyCheckins: {},
+                        weeklyCalculations: {},
                         lastWeeklyCalculation: null,
                         lastSaveDate: null
                     };
